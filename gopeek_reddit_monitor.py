@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 GoPeek Reddit Monitor v1.5
-- 2-day age limit (only posts from last 48 hours)
-- Fixed deduplication (prevents spam)
+- 48-hour age limit
+- Fixed deduplication
 - Stricter matching
+- No multiline f-strings (copy-paste safe)
 """
 
 import os
@@ -46,9 +47,9 @@ KEYWORDS = [
     "save tabs for later", "tab groups", "tab suspension"
 ]
 
-CHECK_INTERVAL = 300  # 5 minutes
-DEDUP_HOURS = 48      # Remember posts for 48 hours
-MAX_POST_AGE_HOURS = 48  # Only check posts from last 48 hours
+CHECK_INTERVAL = 300
+DEDUP_HOURS = 48
+MAX_POST_AGE_HOURS = 48
 STATE_FILE = Path(__file__).parent / "gopeek_monitor_state.json"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -71,7 +72,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     port = int(os.getenv("PORT", "8080"))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"   🏥 Health server on port {port}")
+    print("   Health server on port " + str(port))
     server.serve_forever()
 
 # =========================================================
@@ -92,7 +93,7 @@ def save_state(state):
     cleaned = {k: v for k, v in state.items() if v > cutoff}
     with open(STATE_FILE, "w") as f:
         json.dump(cleaned, f, indent=2)
-    print(f"   💾 State saved: {len(cleaned)} posts tracked")
+    print("   State saved: " + str(len(cleaned)) + " posts tracked")
 
 # =========================================================
 # TELEGRAM
@@ -100,7 +101,7 @@ def save_state(state):
 
 def send_telegram(title, url, subreddit, author, body_preview=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"   ⚠️ Telegram not configured")
+        print("   Telegram not configured")
         return False
 
     def escape_html(text):
@@ -109,33 +110,30 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
     safe_title = escape_html(title)
     safe_preview = escape_html(body_preview[:200])
 
-    message = f"""🚀 <b>GoPeek Alert</b>
+    # Build message with string concatenation - no multiline f-strings
+    message = "GoPeek Alert\n\n"
+    message += safe_title + "\n"
+    message += "r/" + subreddit + "  u/" + author + "\n\n"
+    message += url + "\n\n"
+    message += safe_preview + "..."
 
-📌 <b>{safe_title}</b>
-🏷 r/{subreddit}  👤 u/{author}
-
-🔗 <a href="{url}">View on Reddit</a>
-
-<i>{safe_preview}...</i>"""
-
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    api_url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
 
     try:
         resp = requests.post(api_url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"   ✅ Telegram sent")
+            print("   Telegram sent")
             return True
         else:
-            print(f"   ❌ Telegram failed: {resp.status_code} - {resp.text[:200]}")
+            print("   Telegram failed: " + str(resp.status_code) + " - " + resp.text[:200])
             return False
     except Exception as e:
-        print(f"   ❌ Telegram error: {e}")
+        print("   Telegram error: " + str(e))
         return False
 
 # =========================================================
@@ -143,16 +141,14 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
 # =========================================================
 
 def parse_rss_date(date_str):
-    """Parse RSS date string to datetime."""
     if not date_str:
         return None
 
-    # Common RSS date formats
     formats = [
-        "%a, %d %b %Y %H:%M:%S %z",      # Mon, 08 Jun 2026 14:30:00 +0000
-        "%a, %d %b %Y %H:%M:%S %Z",      # Mon, 08 Jun 2026 14:30:00 GMT
-        "%Y-%m-%dT%H:%M:%S%z",           # 2026-06-08T14:30:00+00:00
-        "%Y-%m-%dT%H:%M:%SZ",            # 2026-06-08T14:30:00Z
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
     ]
 
     for fmt in formats:
@@ -165,19 +161,15 @@ def parse_rss_date(date_str):
 
 
 def is_recent(entry):
-    """Check if post is within MAX_POST_AGE_HOURS."""
-    # Try published date
     date_str = entry.get("published", "") or entry.get("updated", "")
 
     if not date_str:
-        # If no date, assume it's from the "new" feed so it's recent
         return True
 
     post_time = parse_rss_date(date_str)
     if not post_time:
-        return True  # Can't parse, assume recent
+        return True
 
-    # Ensure timezone-aware
     if post_time.tzinfo is None:
         post_time = post_time.replace(tzinfo=timezone.utc)
 
@@ -187,7 +179,8 @@ def is_recent(entry):
 
     is_fresh = age <= max_age
     if not is_fresh:
-        print(f"   ⏰ Skipping old post ({age.days}d {age.seconds//3600}h old): {entry.title[:50]}...")
+        age_str = str(age.days) + "d " + str(age.seconds // 3600) + "h"
+        print("   Skipping old post (" + age_str + " old): " + entry.title[:50] + "...")
 
     return is_fresh
 
@@ -196,7 +189,6 @@ def is_recent(entry):
 # =========================================================
 
 def is_high_quality_match(title, body):
-    """Only alert on genuinely relevant posts."""
     text = (title + " " + body).lower()
 
     strong_signals = [
@@ -234,13 +226,13 @@ def matches_keywords(text):
 # =========================================================
 
 def check_rss_feed(subreddit, state):
-    url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
+    url = "https://www.reddit.com/r/" + subreddit + "/new/.rss"
     headers = {"User-Agent": "GoPeekMonitor/1.5"}
 
     try:
         feed = feedparser.parse(url, request_headers=headers)
     except Exception as e:
-        print(f"[RSS Error] r/{subreddit}: {e}")
+        print("[RSS Error] r/" + subreddit + ": " + str(e))
         return state
 
     matches_found = 0
@@ -249,28 +241,23 @@ def check_rss_feed(subreddit, state):
     already_seen = 0
 
     for entry in feed.entries:
-        # Generate unique ID
-        pid = hashlib.md5(f"{subreddit}:{entry.title}:{entry.get('author', '')}".encode()).hexdigest()
+        pid = hashlib.md5((subreddit + ":" + entry.title + ":" + entry.get("author", "")).encode()).hexdigest()
 
-        # Skip if already processed
         if pid in state:
             already_seen += 1
             continue
 
-        # Skip if too old
         if not is_recent(entry):
             skipped_old += 1
-            state[pid] = datetime.now(timezone.utc).isoformat()  # Mark as seen
+            state[pid] = datetime.now(timezone.utc).isoformat()
             continue
 
         title = entry.title
         body = entry.get("summary", "")
 
-        # Check keywords
         if matches_keywords(title) or matches_keywords(body):
-            # Quality check
             if not is_high_quality_match(title, body):
-                print(f"   ⚠️ Weak match skipped: {title[:60]}...")
+                print("   Weak match skipped: " + title[:60] + "...")
                 skipped_weak += 1
                 state[pid] = datetime.now(timezone.utc).isoformat()
                 continue
@@ -278,16 +265,15 @@ def check_rss_feed(subreddit, state):
             link = entry.link
             author = entry.get("author", "unknown").replace("/u/", "").replace("u/", "")
 
-            print(f"
-🎯 MATCH in r/{subreddit}")
-            print(f"   Title: {title[:80]}")
-            print(f"   Link: {link}")
+            print("\nMATCH in r/" + subreddit)
+            print("   Title: " + title[:80])
+            print("   Link: " + link)
 
             send_telegram(title, link, subreddit, author, body)
             state[pid] = datetime.now(timezone.utc).isoformat()
             matches_found += 1
 
-    print(f"   📊 r/{subreddit}: {matches_found} alerts, {skipped_old} old, {skipped_weak} weak, {already_seen} seen")
+    print("   r/" + subreddit + ": " + str(matches_found) + " alerts, " + str(skipped_old) + " old, " + str(skipped_weak) + " weak, " + str(already_seen) + " seen")
 
     return state
 
@@ -296,32 +282,29 @@ def check_rss_feed(subreddit, state):
 # =========================================================
 
 def monitor_loop():
-    print(f"
-💓 GoPeek Monitor v1.5 started at {datetime.now().isoformat()}")
-    print(f"   Subreddits: {', '.join(SUBREDDITS)}")
-    print(f"   Max post age: {MAX_POST_AGE_HOURS} hours")
-    print(f"   Check interval: {CHECK_INTERVAL}s")
+    print("\nGoPeek Monitor v1.5 started at " + datetime.now().isoformat())
+    print("   Subreddits: " + ", ".join(SUBREDDITS))
+    print("   Max post age: " + str(MAX_POST_AGE_HOURS) + " hours")
+    print("   Check interval: " + str(CHECK_INTERVAL) + "s")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ ERROR: Telegram not configured!")
+        print("ERROR: Telegram not configured!")
         return
 
-    print(f"   ✅ Telegram ready")
+    print("   Telegram ready")
 
     state = load_state()
-    print(f"   📚 Loaded state: {len(state)} posts tracked")
+    print("   Loaded state: " + str(len(state)) + " posts tracked")
 
     while True:
-        print(f"
-[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
+        print("\n[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] Scanning " + str(len(SUBREDDITS)) + " subreddits...")
 
         for sub in SUBREDDITS:
             state = check_rss_feed(sub, state)
             time.sleep(2)
 
         save_state(state)
-        print(f"
-✅ Round complete. Sleeping {CHECK_INTERVAL}s...")
+        print("\nRound complete. Sleeping " + str(CHECK_INTERVAL) + "s...")
         time.sleep(CHECK_INTERVAL)
 
 # =========================================================
