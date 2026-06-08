@@ -15,6 +15,8 @@ import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Keep Railway from killing "idle" container
+print(f"💓 GoPeek Monitor starting at {datetime.now().isoformat()}")
 # =========================================================
 # CONFIGURATION
 # =========================================================
@@ -165,17 +167,31 @@ def run_rss_monitor():
     print(f"Check interval: {CHECK_INTERVAL}s")
     print("=" * 60)
     
+    # Verify Telegram is configured
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ ERROR: Telegram not configured!")
+        print(f"   TOKEN present: {bool(TELEGRAM_BOT_TOKEN)}")
+        print(f"   CHAT_ID present: {bool(TELEGRAM_CHAT_ID)}")
+        return
+    
+    print(f"✅ Telegram configured: TOKEN={'Yes' if TELEGRAM_BOT_TOKEN else 'No'}, CHAT_ID={TELEGRAM_CHAT_ID}")
+    
     state = load_state()
     
     while True:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning...")
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
         
+        match_count = 0
         for sub in SUBREDDITS:
+            before = len(state)
             state = check_rss_feed(sub, state)
+            if len(state) > before:
+                match_count += 1
             time.sleep(2)
         
         save_state(state)
-        print(f"   Done. Sleeping {CHECK_INTERVAL}s...")
+        print(f"   ✅ Done. Matches this round: {match_count}. Sleeping {CHECK_INTERVAL}s...")
+        print(f"   💓 Health check: {datetime.now().isoformat()}")  # Keeps Railway alive
         time.sleep(CHECK_INTERVAL)
 
 # =========================================================
