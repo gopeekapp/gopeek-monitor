@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.0
+GoPeek Reddit Monitor v1.1
 Monitors Reddit for keywords related to GoPeek and sends instant notifications.
 RSS Method — No Reddit API key needed.
 """
@@ -17,6 +17,7 @@ from pathlib import Path
 
 # Keep Railway from killing "idle" container
 print(f"💓 GoPeek Monitor starting at {datetime.now().isoformat()}")
+
 # =========================================================
 # CONFIGURATION
 # =========================================================
@@ -77,6 +78,7 @@ def save_state(state):
 
 def send_telegram(title, url, subreddit, author, body_preview=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"   ⚠️ Telegram not configured: TOKEN={bool(TELEGRAM_BOT_TOKEN)}, CHAT_ID={bool(TELEGRAM_CHAT_ID)}")
         return False
     
     message = f"""🚀 <b>GoPeek Alert</b>
@@ -98,15 +100,32 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
     
     try:
         resp = requests.post(api_url, json=payload, timeout=10)
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            print(f"   ✅ Telegram sent successfully")
+            return True
+        else:
+            print(f"   ❌ Telegram failed: {resp.status_code} - {resp.text[:100]}")
+            return False
     except Exception as e:
-        print(f"[Telegram Error] {e}")
+        print(f"   ❌ Telegram error: {e}")
         return False
 
 def notify_all(title, url, subreddit, author, body=""):
     preview = body.replace("\\n", " ").replace("\\r", "")[:300]
     result = send_telegram(title, url, subreddit, author, preview)
-    print(f"   {'✅' if result else '❌'} Telegram")
+    return result
+
+def test_telegram():
+    """Send a test message immediately."""
+    print("\n🧪 Testing Telegram configuration...")
+    result = send_telegram(
+        "🧪 Test Alert — GoPeek Monitor is live!",
+        "https://github.com/gopeekapp/gopeek-monitor",
+        "test",
+        "system",
+        "If you see this message, your monitor is working correctly!"
+    )
+    print(f"   {'✅' if result else '❌'} Telegram test {'passed' if result else 'failed'}")
     return result
 
 # =========================================================
@@ -129,7 +148,7 @@ def matches_keywords(text):
 
 def check_rss_feed(subreddit, state):
     url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.0"}
+    headers = {"User-Agent": "GoPeekMonitor/1.1"}
     
     try:
         feed = feedparser.parse(url, request_headers=headers)
@@ -174,7 +193,7 @@ def run_rss_monitor():
         print(f"   CHAT_ID present: {bool(TELEGRAM_CHAT_ID)}")
         return
     
-    print(f"✅ Telegram configured: TOKEN={'Yes' if TELEGRAM_BOT_TOKEN else 'No'}, CHAT_ID={TELEGRAM_CHAT_ID}")
+    print(f"✅ Telegram configured: TOKEN=Yes, CHAT_ID={TELEGRAM_CHAT_ID}")
     
     state = load_state()
     
@@ -191,27 +210,13 @@ def run_rss_monitor():
         
         save_state(state)
         print(f"   ✅ Done. Matches this round: {match_count}. Sleeping {CHECK_INTERVAL}s...")
-        print(f"   💓 Health check: {datetime.now().isoformat()}")  # Keeps Railway alive
+        print(f"   💓 Health check: {datetime.now().isoformat()}")
         time.sleep(CHECK_INTERVAL)
 
-
-def test_telegram():
-    """Send a test message immediately."""
-    print("\n🧪 Testing Telegram...")
-    result = send_telegram(
-        "Test Alert — GoPeek Monitor is live!",
-        "https://github.com/gopeekapp/gopeek-monitor",
-        "test",
-        "system",
-        "If you see this, your monitor is working!"
-    )
-    print(f"   {'✅' if result else '❌'} Test result")
-    return result
-    
 # =========================================================
 # MAIN ENTRY
 # =========================================================
 
 if __name__ == "__main__":
-test_telegram()  # Send test first
+    test_telegram()  # Send test first
     run_rss_monitor()
