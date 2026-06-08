@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.1
-Monitors Reddit for keywords related to GoPeek and sends instant notifications.
-RSS Method — No Reddit API key needed.
+GoPeek Reddit Monitor v1.2 — Cron Mode
+Runs once per invocation, checks all subreddits, exits.
+Designed for Railway Cron Jobs or scheduled runners.
 """
 
 import os
 import re
-import time
 import json
 import hashlib
 import feedparser
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
-
-# Keep Railway from killing "idle" container
-print(f"💓 GoPeek Monitor starting at {datetime.now().isoformat()}")
 
 # =========================================================
 # CONFIGURATION
@@ -42,19 +38,18 @@ KEYWORDS = [
     "link preview", "hover preview"
 ]
 
-CHECK_INTERVAL = 300
 DEDUP_HOURS = 72
 STATE_FILE = Path(__file__).parent / "gopeek_monitor_state.json"
 
 # ---------------------------------------------------------
-# NOTIFICATION SETTINGS (from environment variables)
+# NOTIFICATION SETTINGS
 # ---------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # =========================================================
-# DEDUPLICATION ENGINE
+# DEDUPLICATION
 # =========================================================
 
 def load_state():
@@ -73,12 +68,12 @@ def save_state(state):
         json.dump(cleaned, f, indent=2)
 
 # =========================================================
-# NOTIFICATION SENDERS
+# TELEGRAM
 # =========================================================
 
 def send_telegram(title, url, subreddit, author, body_preview=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"   ⚠️ Telegram not configured: TOKEN={bool(TELEGRAM_BOT_TOKEN)}, CHAT_ID={bool(TELEGRAM_CHAT_ID)}")
+        print(f"   ⚠️ Telegram not configured")
         return False
     
     message = f"""🚀 <b>GoPeek Alert</b>
@@ -101,32 +96,14 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
     try:
         resp = requests.post(api_url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print(f"   ✅ Telegram sent successfully")
+            print(f"   ✅ Telegram sent")
             return True
         else:
-            print(f"   ❌ Telegram failed: {resp.status_code} - {resp.text[:100]}")
+            print(f"   ❌ Telegram failed: {resp.status_code}")
             return False
     except Exception as e:
         print(f"   ❌ Telegram error: {e}")
         return False
-
-def notify_all(title, url, subreddit, author, body=""):
-    preview = body.replace("\\n", " ").replace("\\r", "")[:300]
-    result = send_telegram(title, url, subreddit, author, preview)
-    return result
-
-def test_telegram():
-    """Send a test message immediately."""
-    print("\n🧪 Testing Telegram configuration...")
-    result = send_telegram(
-        "🧪 Test Alert — GoPeek Monitor is live!",
-        "https://github.com/gopeekapp/gopeek-monitor",
-        "test",
-        "system",
-        "If you see this message, your monitor is working correctly!"
-    )
-    print(f"   {'✅' if result else '❌'} Telegram test {'passed' if result else 'failed'}")
-    return result
 
 # =========================================================
 # KEYWORD MATCHING
@@ -137,18 +114,18 @@ def matches_keywords(text):
         return False
     text_lower = text.lower()
     for kw in KEYWORDS:
-        pattern = r'\\b' + re.escape(kw.lower()) + r'\\b'
+        pattern = r'\b' + re.escape(kw.lower()) + r'\b'
         if re.search(pattern, text_lower):
             return True
     return False
 
 # =========================================================
-# RSS FEED MONITOR
+# RSS CHECK
 # =========================================================
 
 def check_rss_feed(subreddit, state):
     url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.1"}
+    headers = {"User-Agent": "GoPeekMonitor/1.2"}
     
     try:
         feed = feedparser.parse(url, request_headers=headers)
@@ -173,50 +150,38 @@ def check_rss_feed(subreddit, state):
             print(f"   Title: {title[:80]}")
             print(f"   Link: {link}")
             
-            notify_all(title, link, subreddit, author, body)
+            send_telegram(title, link, subreddit, author, body)
             state[pid] = datetime.now().isoformat()
     
     return state
 
-def run_rss_monitor():
-    print("=" * 60)
-    print("GoPeek Reddit Monitor — RSS Mode")
-    print(f"Subreddits: {', '.join(SUBREDDITS)}")
-    print(f"Keywords: {', '.join(KEYWORDS)}")
-    print(f"Check interval: {CHECK_INTERVAL}s")
-    print("=" * 60)
+# =========================================================
+# MAIN — Runs once, checks all, exits
+# =========================================================
+
+def main():
+    print(f"💓 GoPeek Monitor run at {datetime.now().isoformat()}")
+    print(f"   Subreddits: {', '.join(SUBREDDITS)}")
+    print(f"   Keywords: {', '.join(KEYWORDS[:5])}...")
     
-    # Verify Telegram is configured
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ ERROR: Telegram not configured!")
-        print(f"   TOKEN present: {bool(TELEGRAM_BOT_TOKEN)}")
-        print(f"   CHAT_ID present: {bool(TELEGRAM_CHAT_ID)}")
         return
     
-    print(f"✅ Telegram configured: TOKEN=Yes, CHAT_ID={TELEGRAM_CHAT_ID}")
+    print(f"   ✅ Telegram ready")
     
     state = load_state()
+    total_matches = 0
     
-    while True:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
-        
-        match_count = 0
-        for sub in SUBREDDITS:
-            before = len(state)
-            state = check_rss_feed(sub, state)
-            if len(state) > before:
-                match_count += 1
-            time.sleep(2)
-        
-        save_state(state)
-        print(f"   ✅ Done. Matches this round: {match_count}. Sleeping {CHECK_INTERVAL}s...")
-        print(f"   💓 Health check: {datetime.now().isoformat()}")
-        time.sleep(CHECK_INTERVAL)
-
-# =========================================================
-# MAIN ENTRY
-# =========================================================
+    for sub in SUBREDDITS:
+        before = len(state)
+        state = check_rss_feed(sub, state)
+        if len(state) > before:
+            total_matches += 1
+    
+    save_state(state)
+    print(f"\n✅ Done. Total matches: {total_matches}")
+    print(f"   Next run: every 5 minutes (via Railway scheduler)")
 
 if __name__ == "__main__":
-    test_telegram()  # Send test first
-    run_rss_monitor()
+    main()
