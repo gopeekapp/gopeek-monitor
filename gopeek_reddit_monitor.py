@@ -194,9 +194,24 @@ def run_rss_monitor():
         print(f"   💓 Health check: {datetime.now().isoformat()}")  # Keeps Railway alive
         time.sleep(CHECK_INTERVAL)
 
+
+def test_telegram():
+    """Send a test message immediately."""
+    print("\n🧪 Testing Telegram...")
+    result = send_telegram(
+        "Test Alert — GoPeek Monitor is live!",
+        "https://github.com/gopeekapp/gopeek-monitor",
+        "test",
+        "system",
+        "If you see this, your monitor is working!"
+    )
+    print(f"   {'✅' if result else '❌'} Test result")
+    return result
+    
 # =========================================================
 # MAIN ENTRY
 # =========================================================
 
 if __name__ == "__main__":
+test_telegram()  # Send test first
     run_rss_monitor()
