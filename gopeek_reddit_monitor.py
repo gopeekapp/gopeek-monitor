@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.4
-Stricter matching + fixed Telegram HTML parsing.
+GoPeek Reddit Monitor v1.5
+- 2-day age limit (only posts from last 48 hours)
+- Fixed deduplication (prevents spam)
+- Stricter matching
 """
 
 import os
@@ -12,7 +14,7 @@ import threading
 import time
 import feedparser
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -44,8 +46,9 @@ KEYWORDS = [
     "save tabs for later", "tab groups", "tab suspension"
 ]
 
-CHECK_INTERVAL = 300
-DEDUP_HOURS = 72
+CHECK_INTERVAL = 300  # 5 minutes
+DEDUP_HOURS = 48      # Remember posts for 48 hours
+MAX_POST_AGE_HOURS = 48  # Only check posts from last 48 hours
 STATE_FILE = Path(__file__).parent / "gopeek_monitor_state.json"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -61,7 +64,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK - GoPeek Monitor running")
-    
+
     def log_message(self, format, *args):
         pass
 
@@ -85,10 +88,11 @@ def load_state():
     return {}
 
 def save_state(state):
-    cutoff = (datetime.now() - timedelta(hours=DEDUP_HOURS)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=DEDUP_HOURS)).isoformat()
     cleaned = {k: v for k, v in state.items() if v > cutoff}
     with open(STATE_FILE, "w") as f:
         json.dump(cleaned, f, indent=2)
+    print(f"   💾 State saved: {len(cleaned)} posts tracked")
 
 # =========================================================
 # TELEGRAM
@@ -98,16 +102,16 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"   ⚠️ Telegram not configured")
         return False
-    
+
     def escape_html(text):
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    
+
     safe_title = escape_html(title)
     safe_preview = escape_html(body_preview[:200])
-    
-    message = f"""🚀 GoPeek Alert
 
-📌 {safe_title}
+    message = f"""🚀 <b>GoPeek Alert</b>
+
+📌 <b>{safe_title}</b>
 🏷 r/{subreddit}  👤 u/{author}
 
 🔗 <a href="{url}">View on Reddit</a>
@@ -121,7 +125,7 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
-    
+
     try:
         resp = requests.post(api_url, json=payload, timeout=10)
         if resp.status_code == 200:
@@ -135,13 +139,66 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
         return False
 
 # =========================================================
+# AGE CHECK
+# =========================================================
+
+def parse_rss_date(date_str):
+    """Parse RSS date string to datetime."""
+    if not date_str:
+        return None
+
+    # Common RSS date formats
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",      # Mon, 08 Jun 2026 14:30:00 +0000
+        "%a, %d %b %Y %H:%M:%S %Z",      # Mon, 08 Jun 2026 14:30:00 GMT
+        "%Y-%m-%dT%H:%M:%S%z",           # 2026-06-08T14:30:00+00:00
+        "%Y-%m-%dT%H:%M:%SZ",            # 2026-06-08T14:30:00Z
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
+def is_recent(entry):
+    """Check if post is within MAX_POST_AGE_HOURS."""
+    # Try published date
+    date_str = entry.get("published", "") or entry.get("updated", "")
+
+    if not date_str:
+        # If no date, assume it's from the "new" feed so it's recent
+        return True
+
+    post_time = parse_rss_date(date_str)
+    if not post_time:
+        return True  # Can't parse, assume recent
+
+    # Ensure timezone-aware
+    if post_time.tzinfo is None:
+        post_time = post_time.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    age = now - post_time
+    max_age = timedelta(hours=MAX_POST_AGE_HOURS)
+
+    is_fresh = age <= max_age
+    if not is_fresh:
+        print(f"   ⏰ Skipping old post ({age.days}d {age.seconds//3600}h old): {entry.title[:50]}...")
+
+    return is_fresh
+
+# =========================================================
 # QUALITY FILTER
 # =========================================================
 
 def is_high_quality_match(title, body):
     """Only alert on genuinely relevant posts."""
     text = (title + " " + body).lower()
-    
+
     strong_signals = [
         "peek", "preview", "glance", "hover preview", "link preview",
         "too many tabs", "tab overload", "tab clutter", "drowning in tabs",
@@ -150,12 +207,12 @@ def is_high_quality_match(title, body):
         "sidebar", "side panel", "split view",
         "without opening tabs", "open links without", "save tabs for later"
     ]
-    
+
     has_strong = any(signal in text for signal in strong_signals)
-    
+
     junk = ["porn", "nsfw", "xxx", "crypto", "nft", "airdrop", "giveaway"]
     has_junk = any(j in text for j in junk)
-    
+
     return has_strong and not has_junk
 
 # =========================================================
@@ -178,40 +235,60 @@ def matches_keywords(text):
 
 def check_rss_feed(subreddit, state):
     url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.4"}
-    
+    headers = {"User-Agent": "GoPeekMonitor/1.5"}
+
     try:
         feed = feedparser.parse(url, request_headers=headers)
     except Exception as e:
         print(f"[RSS Error] r/{subreddit}: {e}")
         return state
-    
+
+    matches_found = 0
+    skipped_old = 0
+    skipped_weak = 0
+    already_seen = 0
+
     for entry in feed.entries:
+        # Generate unique ID
         pid = hashlib.md5(f"{subreddit}:{entry.title}:{entry.get('author', '')}".encode()).hexdigest()
-        
+
+        # Skip if already processed
         if pid in state:
+            already_seen += 1
             continue
-        
+
+        # Skip if too old
+        if not is_recent(entry):
+            skipped_old += 1
+            state[pid] = datetime.now(timezone.utc).isoformat()  # Mark as seen
+            continue
+
         title = entry.title
         body = entry.get("summary", "")
-        
+
+        # Check keywords
         if matches_keywords(title) or matches_keywords(body):
             # Quality check
             if not is_high_quality_match(title, body):
                 print(f"   ⚠️ Weak match skipped: {title[:60]}...")
-                state[pid] = datetime.now().isoformat()
+                skipped_weak += 1
+                state[pid] = datetime.now(timezone.utc).isoformat()
                 continue
-            
+
             link = entry.link
             author = entry.get("author", "unknown").replace("/u/", "").replace("u/", "")
-            
-            print(f"\n🎯 MATCH in r/{subreddit}")
+
+            print(f"
+🎯 MATCH in r/{subreddit}")
             print(f"   Title: {title[:80]}")
             print(f"   Link: {link}")
-            
+
             send_telegram(title, link, subreddit, author, body)
-            state[pid] = datetime.now().isoformat()
-    
+            state[pid] = datetime.now(timezone.utc).isoformat()
+            matches_found += 1
+
+    print(f"   📊 r/{subreddit}: {matches_found} alerts, {skipped_old} old, {skipped_weak} weak, {already_seen} seen")
+
     return state
 
 # =========================================================
@@ -219,36 +296,32 @@ def check_rss_feed(subreddit, state):
 # =========================================================
 
 def monitor_loop():
-    print(f"\n💓 GoPeek Monitor started at {datetime.now().isoformat()}")
+    print(f"
+💓 GoPeek Monitor v1.5 started at {datetime.now().isoformat()}")
     print(f"   Subreddits: {', '.join(SUBREDDITS)}")
-    print(f"   Keywords: {len(KEYWORDS)} phrases loaded")
-    
+    print(f"   Max post age: {MAX_POST_AGE_HOURS} hours")
+    print(f"   Check interval: {CHECK_INTERVAL}s")
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ ERROR: Telegram not configured!")
         return
-    
+
     print(f"   ✅ Telegram ready")
-    
+
     state = load_state()
-    
+    print(f"   📚 Loaded state: {len(state)} posts tracked")
+
     while True:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
-        
-        total_matches = 0
-        skipped_weak = 0
-        
+        print(f"
+[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
+
         for sub in SUBREDDITS:
-            before = len(state)
             state = check_rss_feed(sub, state)
-            added = len(state) - before
-            if added > 0:
-                # Check if it was a real alert or skipped
-                # (We'd need to track this better, but for now just count)
-                pass
             time.sleep(2)
-        
+
         save_state(state)
-        print(f"   ✅ Done. Sleeping {CHECK_INTERVAL}s...")
+        print(f"
+✅ Round complete. Sleeping {CHECK_INTERVAL}s...")
         time.sleep(CHECK_INTERVAL)
 
 # =========================================================
