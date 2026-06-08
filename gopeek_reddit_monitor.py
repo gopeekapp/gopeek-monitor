@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.3
-Keeps Railway alive with a health server + background thread for Reddit checks.
+GoPeek Reddit Monitor v1.4
+Stricter matching + fixed Telegram HTML parsing.
 """
 
 import os
@@ -33,11 +33,15 @@ SUBREDDITS = [
 ]
 
 KEYWORDS = [
-    "tab", "tabs", "tab overload", "too many tabs",
-    "peek", "preview", "preview links", "glance",
-    "sidebar", "side bar",
-    "browser extension", "firefox extension", "chrome extension",
-    "link preview", "hover preview"
+    "peek", "preview", "preview links", "glance", "hover preview", "link preview",
+    "too many tabs", "tab overload", "tab clutter", "drowning in tabs",
+    "manage tabs", "tab management", "tab hoarding", "tab anxiety",
+    "50 tabs", "100 tabs", "30 tabs", "20 tabs", "hundreds of tabs",
+    "browser extension", "firefox extension", "chrome extension", "edge extension",
+    "extension for", "need extension", "looking for extension",
+    "sidebar", "side panel", "split view", "dual pane",
+    "open links without", "without opening tabs", "don't want to open",
+    "save tabs for later", "tab groups", "tab suspension"
 ]
 
 CHECK_INTERVAL = 300
@@ -48,7 +52,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # =========================================================
-# HEALTH SERVER (Keeps Railway from killing container)
+# HEALTH SERVER
 # =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -59,7 +63,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - GoPeek Monitor running")
     
     def log_message(self, format, *args):
-        pass  # Suppress logs
+        pass
 
 def start_health_server():
     port = int(os.getenv("PORT", "8080"))
@@ -95,14 +99,20 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
         print(f"   ⚠️ Telegram not configured")
         return False
     
-    message = f"""🚀 <b>GoPeek Alert</b>
+    def escape_html(text):
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    safe_title = escape_html(title)
+    safe_preview = escape_html(body_preview[:200])
+    
+    message = f"""🚀 GoPeek Alert
 
-📌 <b>{title}</b>
+📌 {safe_title}
 🏷 r/{subreddit}  👤 u/{author}
 
 🔗 <a href="{url}">View on Reddit</a>
 
-<i>{body_preview[:200]}...</i>"""
+<i>{safe_preview}...</i>"""
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -118,11 +128,35 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
             print(f"   ✅ Telegram sent")
             return True
         else:
-            print(f"   ❌ Telegram failed: {resp.status_code}")
+            print(f"   ❌ Telegram failed: {resp.status_code} - {resp.text[:200]}")
             return False
     except Exception as e:
         print(f"   ❌ Telegram error: {e}")
         return False
+
+# =========================================================
+# QUALITY FILTER
+# =========================================================
+
+def is_high_quality_match(title, body):
+    """Only alert on genuinely relevant posts."""
+    text = (title + " " + body).lower()
+    
+    strong_signals = [
+        "peek", "preview", "glance", "hover preview", "link preview",
+        "too many tabs", "tab overload", "tab clutter", "drowning in tabs",
+        "tab management", "tab hoarding", "tab anxiety", "hundreds of tabs",
+        "browser extension", "firefox extension", "chrome extension", "edge extension",
+        "sidebar", "side panel", "split view",
+        "without opening tabs", "open links without", "save tabs for later"
+    ]
+    
+    has_strong = any(signal in text for signal in strong_signals)
+    
+    junk = ["porn", "nsfw", "xxx", "crypto", "nft", "airdrop", "giveaway"]
+    has_junk = any(j in text for j in junk)
+    
+    return has_strong and not has_junk
 
 # =========================================================
 # KEYWORD MATCHING
@@ -144,7 +178,7 @@ def matches_keywords(text):
 
 def check_rss_feed(subreddit, state):
     url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.3"}
+    headers = {"User-Agent": "GoPeekMonitor/1.4"}
     
     try:
         feed = feedparser.parse(url, request_headers=headers)
@@ -162,6 +196,12 @@ def check_rss_feed(subreddit, state):
         body = entry.get("summary", "")
         
         if matches_keywords(title) or matches_keywords(body):
+            # Quality check
+            if not is_high_quality_match(title, body):
+                print(f"   ⚠️ Weak match skipped: {title[:60]}...")
+                state[pid] = datetime.now().isoformat()
+                continue
+            
             link = entry.link
             author = entry.get("author", "unknown").replace("/u/", "").replace("u/", "")
             
@@ -181,7 +221,7 @@ def check_rss_feed(subreddit, state):
 def monitor_loop():
     print(f"\n💓 GoPeek Monitor started at {datetime.now().isoformat()}")
     print(f"   Subreddits: {', '.join(SUBREDDITS)}")
-    print(f"   Keywords: {', '.join(KEYWORDS[:5])}...")
+    print(f"   Keywords: {len(KEYWORDS)} phrases loaded")
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ ERROR: Telegram not configured!")
@@ -195,15 +235,20 @@ def monitor_loop():
         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
         
         total_matches = 0
+        skipped_weak = 0
+        
         for sub in SUBREDDITS:
             before = len(state)
             state = check_rss_feed(sub, state)
-            if len(state) > before:
-                total_matches += 1
+            added = len(state) - before
+            if added > 0:
+                # Check if it was a real alert or skipped
+                # (We'd need to track this better, but for now just count)
+                pass
             time.sleep(2)
         
         save_state(state)
-        print(f"   ✅ Done. Matches: {total_matches}. Sleeping {CHECK_INTERVAL}s...")
+        print(f"   ✅ Done. Sleeping {CHECK_INTERVAL}s...")
         time.sleep(CHECK_INTERVAL)
 
 # =========================================================
@@ -211,9 +256,6 @@ def monitor_loop():
 # =========================================================
 
 if __name__ == "__main__":
-    # Start health server in background thread
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
-    
-    # Start monitor in main thread
     monitor_loop()
