@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.2 — Cron Mode
-Runs once per invocation, checks all subreddits, exits.
-Designed for Railway Cron Jobs or scheduled runners.
+GoPeek Reddit Monitor v1.3
+Keeps Railway alive with a health server + background thread for Reddit checks.
 """
 
 import os
 import re
 import json
 import hashlib
+import threading
+import time
 import feedparser
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =========================================================
 # CONFIGURATION
@@ -38,15 +40,32 @@ KEYWORDS = [
     "link preview", "hover preview"
 ]
 
+CHECK_INTERVAL = 300
 DEDUP_HOURS = 72
 STATE_FILE = Path(__file__).parent / "gopeek_monitor_state.json"
 
-# ---------------------------------------------------------
-# NOTIFICATION SETTINGS
-# ---------------------------------------------------------
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# =========================================================
+# HEALTH SERVER (Keeps Railway from killing container)
+# =========================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - GoPeek Monitor running")
+    
+    def log_message(self, format, *args):
+        pass  # Suppress logs
+
+def start_health_server():
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"   🏥 Health server on port {port}")
+    server.serve_forever()
 
 # =========================================================
 # DEDUPLICATION
@@ -125,7 +144,7 @@ def matches_keywords(text):
 
 def check_rss_feed(subreddit, state):
     url = f"https://www.reddit.com/r/{subreddit}/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.2"}
+    headers = {"User-Agent": "GoPeekMonitor/1.3"}
     
     try:
         feed = feedparser.parse(url, request_headers=headers)
@@ -156,11 +175,11 @@ def check_rss_feed(subreddit, state):
     return state
 
 # =========================================================
-# MAIN — Runs once, checks all, exits
+# BACKGROUND MONITOR
 # =========================================================
 
-def main():
-    print(f"💓 GoPeek Monitor run at {datetime.now().isoformat()}")
+def monitor_loop():
+    print(f"\n💓 GoPeek Monitor started at {datetime.now().isoformat()}")
     print(f"   Subreddits: {', '.join(SUBREDDITS)}")
     print(f"   Keywords: {', '.join(KEYWORDS[:5])}...")
     
@@ -171,17 +190,30 @@ def main():
     print(f"   ✅ Telegram ready")
     
     state = load_state()
-    total_matches = 0
     
-    for sub in SUBREDDITS:
-        before = len(state)
-        state = check_rss_feed(sub, state)
-        if len(state) > before:
-            total_matches += 1
-    
-    save_state(state)
-    print(f"\n✅ Done. Total matches: {total_matches}")
-    print(f"   Next run: every 5 minutes (via Railway scheduler)")
+    while True:
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scanning {len(SUBREDDITS)} subreddits...")
+        
+        total_matches = 0
+        for sub in SUBREDDITS:
+            before = len(state)
+            state = check_rss_feed(sub, state)
+            if len(state) > before:
+                total_matches += 1
+            time.sleep(2)
+        
+        save_state(state)
+        print(f"   ✅ Done. Matches: {total_matches}. Sleeping {CHECK_INTERVAL}s...")
+        time.sleep(CHECK_INTERVAL)
+
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
-    main()
+    # Start health server in background thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    
+    # Start monitor in main thread
+    monitor_loop()
