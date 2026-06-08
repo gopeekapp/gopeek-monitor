@@ -23,11 +23,12 @@ SUBREDDITS = [
     "browsers",
     "firefox",
     "chrome",
-    "edge",
+    "microsoftedge",
     "productivity",
     "webdev",
     "programming",
-    "opensource"
+    "opensource",
+    "chrome_extensions"
 ]
 
 KEYWORDS = [
