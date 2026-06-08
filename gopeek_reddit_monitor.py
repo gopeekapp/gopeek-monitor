@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-GoPeek Reddit Monitor v1.5
+GoPeek Reddit Monitor v1.6
+- STRICT whole-word matching only
+- Exclude subreddit name from body matching
 - 48-hour age limit
 - Fixed deduplication
-- Stricter matching
-- No multiline f-strings (copy-paste safe)
 """
 
 import os
@@ -35,16 +35,28 @@ SUBREDDITS = [
     "chrome_extensions"
 ]
 
+# STRICT phrases - must match as whole words only
 KEYWORDS = [
-    "peek", "preview", "preview links", "glance", "hover preview", "link preview",
+    "peek", "preview", "glance", "hover preview", "link preview",
     "too many tabs", "tab overload", "tab clutter", "drowning in tabs",
-    "manage tabs", "tab management", "tab hoarding", "tab anxiety",
-    "50 tabs", "100 tabs", "30 tabs", "20 tabs", "hundreds of tabs",
-    "browser extension", "firefox extension", "chrome extension", "edge extension",
-    "extension for", "need extension", "looking for extension",
+    "tab management", "tab hoarding", "tab anxiety", "hundreds of tabs",
+    "without opening tabs", "open links without", "save tabs for later",
     "sidebar", "side panel", "split view", "dual pane",
-    "open links without", "without opening tabs", "don't want to open",
-    "save tabs for later", "tab groups", "tab suspension"
+    "tab suspension", "tab groups"
+]
+
+# Only match these in specific contexts (not just anywhere)
+EXTENSION_KEYWORDS = [
+    "browser extension for tabs",
+    "extension for tab management",
+    "extension to manage tabs",
+    "extension to preview links",
+    "extension for link preview",
+    "need an extension",
+    "looking for extension",
+    "recommend an extension",
+    "what extension",
+    "which extension"
 ]
 
 CHECK_INTERVAL = 300
@@ -110,7 +122,6 @@ def send_telegram(title, url, subreddit, author, body_preview=""):
     safe_title = escape_html(title)
     safe_preview = escape_html(body_preview[:200])
 
-    # Build message with string concatenation - no multiline f-strings
     message = "GoPeek Alert\n\n"
     message += safe_title + "\n"
     message += "r/" + subreddit + "  u/" + author + "\n\n"
@@ -185,41 +196,72 @@ def is_recent(entry):
     return is_fresh
 
 # =========================================================
-# QUALITY FILTER
+# STRICT MATCHING
 # =========================================================
 
-def is_high_quality_match(title, body):
-    text = (title + " " + body).lower()
-
-    strong_signals = [
-        "peek", "preview", "glance", "hover preview", "link preview",
-        "too many tabs", "tab overload", "tab clutter", "drowning in tabs",
-        "tab management", "tab hoarding", "tab anxiety", "hundreds of tabs",
-        "browser extension", "firefox extension", "chrome extension", "edge extension",
-        "sidebar", "side panel", "split view",
-        "without opening tabs", "open links without", "save tabs for later"
-    ]
-
-    has_strong = any(signal in text for signal in strong_signals)
-
-    junk = ["porn", "nsfw", "xxx", "crypto", "nft", "airdrop", "giveaway"]
-    has_junk = any(j in text for j in junk)
-
-    return has_strong and not has_junk
-
-# =========================================================
-# KEYWORD MATCHING
-# =========================================================
-
-def matches_keywords(text):
+def strict_match(text, phrase):
+    """Match phrase as whole words only."""
     if not text:
         return False
     text_lower = text.lower()
+    phrase_lower = phrase.lower()
+
+    # Escape special regex chars in phrase
+    escaped = re.escape(phrase_lower)
+
+    # Match as whole word with word boundaries
+    pattern = r'\b' + escaped + r'\b'
+    return bool(re.search(pattern, text_lower))
+
+
+def matches_keywords(title, body, subreddit):
+    """Check if post matches ANY keyword with strict whole-word matching."""
+    combined = title + " " + body
+
+    # Check core keywords
     for kw in KEYWORDS:
-        pattern = r'\b' + re.escape(kw.lower()) + r'\b'
-        if re.search(pattern, text_lower):
-            return True
-    return False
+        if strict_match(combined, kw):
+            return True, kw
+
+    # Check extension keywords (only in non-extension subreddits to avoid spam)
+    if subreddit not in ["chrome_extensions", "firefox_addons", "edge_extensions"]:
+        for kw in EXTENSION_KEYWORDS:
+            if strict_match(combined, kw):
+                return True, kw
+
+    return False, None
+
+# =========================================================
+# QUALITY FILTER
+# =========================================================
+
+def is_high_quality_match(title, body, matched_keyword, subreddit):
+    """Only alert on genuinely relevant posts."""
+    text = (title + " " + body).lower()
+
+    # Must contain a strong intent signal
+    intent_signals = [
+        "looking for", "need", "want", "recommend", "suggestion",
+        "help", "how to", "is there", "any way", "best way",
+        "tired of", "fed up", "annoying", "problem", "struggle",
+        "too many", "drowning", "overwhelmed", "cluttered"
+    ]
+
+    has_intent = any(signal in text for signal in intent_signals)
+
+    # Reject obvious junk
+    junk = ["porn", "nsfw", "xxx", "crypto", "nft", "airdrop", "giveaway", "vpn"]
+    has_junk = any(j in text for j in junk)
+
+    # Reject if it's just a generic extension announcement (not asking for help)
+    if subreddit in ["chrome_extensions"]:
+        # In chrome_extensions subreddit, only alert if someone is ASKING
+        asking_signals = ["looking for", "need", "want", "recommend", "suggestion", "help", "how to"]
+        is_asking = any(s in text for s in asking_signals)
+        if not is_asking:
+            return False
+
+    return has_intent and not has_junk
 
 # =========================================================
 # RSS CHECK
@@ -227,7 +269,7 @@ def matches_keywords(text):
 
 def check_rss_feed(subreddit, state):
     url = "https://www.reddit.com/r/" + subreddit + "/new/.rss"
-    headers = {"User-Agent": "GoPeekMonitor/1.5"}
+    headers = {"User-Agent": "GoPeekMonitor/1.6"}
 
     try:
         feed = feedparser.parse(url, request_headers=headers)
@@ -255,9 +297,11 @@ def check_rss_feed(subreddit, state):
         title = entry.title
         body = entry.get("summary", "")
 
-        if matches_keywords(title) or matches_keywords(body):
-            if not is_high_quality_match(title, body):
-                print("   Weak match skipped: " + title[:60] + "...")
+        matched, keyword = matches_keywords(title, body, subreddit)
+
+        if matched:
+            if not is_high_quality_match(title, body, keyword, subreddit):
+                print("   Weak match skipped: " + title[:60] + "... (matched: " + keyword + ")")
                 skipped_weak += 1
                 state[pid] = datetime.now(timezone.utc).isoformat()
                 continue
@@ -267,6 +311,7 @@ def check_rss_feed(subreddit, state):
 
             print("\nMATCH in r/" + subreddit)
             print("   Title: " + title[:80])
+            print("   Keyword: " + keyword)
             print("   Link: " + link)
 
             send_telegram(title, link, subreddit, author, body)
@@ -282,7 +327,7 @@ def check_rss_feed(subreddit, state):
 # =========================================================
 
 def monitor_loop():
-    print("\nGoPeek Monitor v1.5 started at " + datetime.now().isoformat())
+    print("\nGoPeek Monitor v1.6 started at " + datetime.now().isoformat())
     print("   Subreddits: " + ", ".join(SUBREDDITS))
     print("   Max post age: " + str(MAX_POST_AGE_HOURS) + " hours")
     print("   Check interval: " + str(CHECK_INTERVAL) + "s")
